@@ -1,0 +1,355 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// Users & Projects
+// ============================================================
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String
+  role         String   @default("member") // member | admin
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  projects    Project[]
+  tasks       Task[]
+  auditLogs   AuditLog[]
+  memories    Memory[]  @relation("UserMemories")
+}
+
+model Project {
+  id          String   @id @default(cuid())
+  userId      String
+  name        String
+  description String   @default("")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  repository Repository?
+  tasks      Task[]
+  memories   Memory[]    @relation("ProjectMemories")
+  agentRuns  AgentRun[]
+}
+
+// ============================================================
+// Repository Intelligence
+// ============================================================
+
+model Repository {
+  id            String   @id @default(cuid())
+  projectId     String   @unique
+  // Either a remote git URL or "sample:legacy-shop" or a local absolute path
+  source        String
+  sourceType    String // remote | local | sample
+  branch        String   @default("")
+  localPath     String   @default("") // canonical clone location under .agent-data/repos/<id>
+  cloneStatus   String   @default("pending") // pending | cloning | ready | failed
+  cloneError    String   @default("")
+  defaultBranch String   @default("main")
+  headCommit    String   @default("")
+  sizeKb        Int       @default(0)
+  fileCount     Int       @default(0)
+  // analysisStatus: pending | indexing | analyzing | ready | failed
+  analysisStatus String  @default("pending")
+  analysisError  String  @default("")
+  lastIndexedAt  DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  project      Project            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  analysis     RepositoryAnalysis?
+  files        File[]
+  symbols      Symbol[]
+  relationships Relationship[]
+  documents    Document[]
+}
+
+model RepositoryAnalysis {
+  id           String   @id @default(cuid())
+  repositoryId String   @unique
+  status       String   @default("running") // running | completed | failed
+  startedAt    DateTime @default(now())
+  completedAt  DateTime?
+  error        String   @default("")
+  // JSON: { languages, frameworks, testFrameworks, database, dependencies,
+  //        importantDirectories, services, entryPoints, architectureSummary, stats }
+  overview     String   @default("{}")
+  progress     Int      @default(0) // 0..100
+  progressStep String   @default("")
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+}
+
+model File {
+  id           String   @id @default(cuid())
+  repositoryId String
+  path         String
+  language     String   @default("unknown")
+  sizeBytes    Int      @default(0)
+  loc          Int      @default(0)
+  isTest       Boolean  @default(false)
+  isConfig     Boolean  @default(false)
+  isDoc        Boolean  @default(false)
+  module       String   @default("") // derived module name e.g. src/services
+  lastModified String   @default("")
+
+  repository    Repository     @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  symbols       Symbol[]
+  @@unique([repositoryId, path])
+  @@index([repositoryId, language])
+  @@index([repositoryId, isTest])
+}
+
+model Symbol {
+  id            String   @id @default(cuid())
+  repositoryId  String
+  fileId        String
+  name          String
+  qualifiedName String
+  kind          String // class | function | method | interface | type | const | route | table | component | variable
+  signature     String   @default("")
+  lineStart     Int      @default(0)
+  lineEnd       Int      @default(0)
+  exported      Boolean  @default(false)
+  docComment    String   @default("")
+  // JSON: params, returnType, extra metadata
+  metadata      String   @default("{}")
+
+  file File       @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@unique([repositoryId, qualifiedName])
+  @@index([repositoryId, kind])
+  @@index([repositoryId, name])
+}
+
+model Relationship {
+  id           String  @id @default(cuid())
+  repositoryId String
+  // IMPORTS | CALLS | REFERENCES | IMPLEMENTS | EXTENDS | READS | WRITES |
+  // TESTS | CONFIGURES | ROUTES_TO | DEPENDS_ON
+  kind         String
+  fromFile     String
+  fromSymbol   String  @default("")
+  toFile       String
+  toSymbol     String  @default("")
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@index([repositoryId, kind])
+  @@index([repositoryId, fromFile])
+  @@index([repositoryId, toFile])
+  @@index([repositoryId, toSymbol])
+}
+
+model Document {
+  id           String   @id @default(cuid())
+  repositoryId String
+  // readme | doc | comment | commit | test | issue | config
+  sourceType   String
+  sourcePath   String   @default("")
+  title        String
+  content      String
+  // JSON array of floats — local deterministic embedding (hashed TF vector)
+  embedding    String   @default("[]")
+  chunkIndex   Int      @default(0)
+  createdAt    DateTime @default(now())
+
+  repository Repository @relation(fields: [repositoryId], references: [id], onDelete: Cascade)
+  @@index([repositoryId, sourceType])
+}
+
+model Task {
+  id          String   @id @default(cuid())
+  projectId   String
+  userId      String
+  title       String
+  description String
+  // open | in_progress | completed | failed | cancelled
+  status      String   @default("open")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  project   Project    @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentRuns AgentRun[]
+}
+
+// State machine per spec §9:
+// CREATED -> DISCOVERING -> UNDERSTANDING -> IMPACT_ANALYSIS -> PLANNING ->
+// WAITING_FOR_APPROVAL -> IMPLEMENTING -> VERIFYING -> FIXING -> FINAL_REVIEW -> COMPLETED
+// (+ FAILED | CANCELLED | BLOCKED)
+model AgentRun {
+  id        String   @id @default(cuid())
+  taskId    String
+  projectId String
+  state     String   @default("CREATED")
+  // The structured AgentStateObject from spec §10, stored as JSON
+  stateData String   @default("{}")
+  branch    String   @default("")
+  workspacePath String @default("")
+  provider  String   @default("") // llm provider name
+  model     String   @default("") // primary model used
+  tokenUsage Int     @default(0)
+  error     String   @default("")
+  startedAt DateTime @default(now())
+  finishedAt DateTime?
+  // run-mode: autonomous (full loop) | assisted
+  mode      String   @default("autonomous")
+
+  task    Task         @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  project Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  events  AgentEvent[]
+  plan    Plan?
+  changes Change[]
+  testRuns TestRun[]
+}
+
+model AgentEvent {
+  id        String   @id @default(cuid())
+  runId     String
+  seq       Int
+  // phase: repository | investigation | impact | plan | approval | implementation |
+  //        verification | fix | review | system
+  phase     String
+  // status | info | tool | warning | error | success | approval
+  type      String
+  title     String
+  detail    String   @default("")
+  // JSON: tool call args/results summary, counts, links
+  data      String   @default("{}")
+  createdAt DateTime @default(now())
+
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@unique([runId, seq])
+  @@index([runId, createdAt])
+}
+
+model Plan {
+  id           String   @id @default(cuid())
+  runId        String   @unique
+  // proposed | approved | rejected
+  status       String   @default("proposed")
+  objective    String
+  // JSON string arrays per spec §13
+  assumptions  String   @default("[]")
+  filesToModify String  @default("[]")
+  filesToCreate String  @default("[]")
+  filesToDelete String  @default("[]")
+  databaseChanges String @default("[]")
+  apiChanges   String   @default("[]")
+  dependencies String   @default("[]")
+  testsRequired String  @default("[]")
+  risks        String   @default("[]")
+  rollbackStrategy String @default("")
+  // full plan JSON incl. narrative/steps for richer UI
+  full        String   @default("{}")
+  approvedBy  String?
+  approvedAt  DateTime?
+  rejectionReason String @default("")
+  createdAt   DateTime @default(now())
+
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+}
+
+model Change {
+  id         String  @id @default(cuid())
+  runId      String
+  file       String
+  // modified | created | deleted
+  changeType String
+  additions  Int     @default(0)
+  deletions  Int     @default(0)
+  diff       String  @default("")
+
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@index([runId])
+}
+
+model TestRun {
+  id        String   @id @default(cuid())
+  runId     String
+  // test | lint | typecheck | build | static
+  kind      String
+  command   String
+  // passed | failed | error | skipped
+  status    String
+  summary   String   @default("")
+  output    String   @default("")
+  durationMs Int     @default(0)
+  fixAttempt Int     @default(0) // which fix iteration this run belongs to (0 = initial)
+  // agent_caused | pre_existing | flaky | environment | unrelated
+  classification String @default("")
+  relatedToChange Boolean @default(true)
+  startedAt DateTime @default(now())
+
+  run AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  @@index([runId])
+}
+
+// ============================================================
+// Memory & Audit
+// ============================================================
+
+// Durable project memory. kind distinguishes provenance (spec §18):
+// verified_fact | inferred | user_rule | assumption
+model Memory {
+  id        String   @id @default(cuid())
+  projectId String
+  userId    String?
+  kind      String
+  // architecture | convention | quirk | compatibility | decision | rule
+  category  String
+  content   String
+  source    String   @default("") // e.g. "git:abc123", "doc:docs/architecture.md", "user"
+  confidence Float   @default(0.5)
+  createdAt DateTime @default(now())
+
+  project Project @relation("ProjectMemories", fields: [projectId], references: [id], onDelete: Cascade)
+  user    User?   @relation("UserMemories", fields: [userId], references: [id])
+  @@index([projectId])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String
+  action    String // login | project.create | repo.connect | plan.approve | run.commit ...
+  target    String   @default("")
+  // JSON metadata
+  metadata  String   @default("{}")
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  @@index([userId, createdAt])
+}
+
+// ============================================================
+// LLM Provider settings (e.g. 9router / OpenRouter / LiteLLM)
+// ============================================================
+
+// Singleton row (id = "default"): OpenAI-compatible gateway config
+// entered by the user in the dashboard. Takes priority over env vars.
+model ProviderConfig {
+  id        String   @id @default("default")
+  enabled   Boolean  @default(false)
+  baseUrl   String   @default("") // e.g. http://localhost:20128/v1
+  apiKey    String   @default("") // stored server-side only; masked in API responses
+  providerName String @default("") // display label, e.g. "9router"
+  defaultModel    String @default("")
+  fastModel       String @default("")
+  reasoningModel  String @default("")
+  codingModel     String @default("")
+  embeddingModel  String @default("")
+  lastCheckedAt   DateTime?
+  lastCheckOk     Boolean  @default(false)
+  lastCheckError  String   @default("")
+  updatedAt DateTime @updatedAt
+}
