@@ -1,0 +1,10 @@
+{
+  "name": "legacy-shop",
+  "version": "0.1.0",
+  "description": "Legacy order management backend (VMS era import)",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js"
+  },
+  "license": "MIT"
+}

@@ -1,0 +1,6 @@
+[
+  { "id": 1001, "sku": "KB-100", "name": "Mechanical Keyboard", "priceCents": 7999, "stock": 42, "active": true },
+  { "id": 1002, "sku": "MS-220", "name": "Wireless Mouse", "priceCents": 3499, "stock": 128, "active": true },
+  { "id": 1003, "sku": "HD-040", "name": "USB-C Hub", "priceCents": 4599, "stock": 0, "active": true },
+  { "id": 1004, "sku": "MN-270", "name": "27in Monitor", "priceCents": 24999, "stock": 15, "active": false }
+]
